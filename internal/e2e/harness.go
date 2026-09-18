@@ -689,11 +689,12 @@ func (h *Harness) AgentInvocations() []Invocation {
 
 // Invocation is a single fake-agent call captured in $FAKEAGENT_LOG.
 type Invocation struct {
-	Time   string   `json:"time"`
-	Agent  string   `json:"agent"`
-	Args   []string `json:"args"`
-	Prompt string   `json:"prompt"`
-	CWD    string   `json:"cwd,omitempty"`
+	Time                 string   `json:"time"`
+	Agent                string   `json:"agent"`
+	Args                 []string `json:"args"`
+	Prompt               string   `json:"prompt"`
+	CWD                  string   `json:"cwd,omitempty"`
+	CopilotHooksDisabled *bool    `json:"copilot_hooks_disabled,omitempty"`
 }
 
 func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {

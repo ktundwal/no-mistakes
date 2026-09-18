@@ -170,14 +170,14 @@ Suppress project-level agent settings and instructions for every gate-agent star
 | Type | `bool` |
 | Default | `false` |
 
-This opt-in is intended for agent-orchestration repositories whose `AGENTS.md`, `CLAUDE.md`, or harness-specific project settings would give a validation agent an operator identity and authority that it must not adopt.
-When enabled, no-mistakes suppresses the target checkout's project settings for every agent-driven gate step while preserving user-level agent configuration.
-Codex, Claude, Pi, and Copilot are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling), and Copilot runs with `--no-custom-instructions` (verified with Copilot CLI 1.0.86-2).
+This opt-in is intended for agent-orchestration repositories whose `AGENTS.md`, `CLAUDE.md`, hooks, or harness-specific project settings would give a validation agent an operator identity, block its tools, or grant authority that it must not adopt.
+When enabled, no-mistakes suppresses the target checkout's project settings for every agent-driven gate step. Each verified adapter retains the user-level state that is safe outside that project surface.
+Codex, Claude, Pi, and Copilot are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, and Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling). Copilot receives `--no-custom-instructions` and `--allow-all-paths`, then runs from an empty per-invocation working directory with the absolute target path in its prompt. A private `COPILOT_HOME` enables the supported `disableAllHooks` setting and carries copied authentication metadata and BYOK provider definitions. The separate discovery root is required because a trusted target can override a user-level `disableAllHooks`; it leaves the checkout untouched and is verified with Copilot CLI 1.0.86-2.
 Grok 1.0.5 still discovers native project instructions and `.grok` project surfaces, so it is not a verified agent for this boundary. A configuration that resolves Grok while this option is enabled therefore fails closed before launch.
 The setting applies to both new and resumed sessions.
 
 The gate fails before launching an agent if any resolved agent or fallback lacks a verified suppression mechanism.
-It also fails if `agent_args_override` defeats or conflicts with suppression, such as a nonzero Codex `project_doc_max_bytes`, Claude setting sources that include `project` or `local`, or Copilot custom-agent selection/value-bearing `--no-custom-instructions` forms.
+It also fails if `agent_args_override` defeats or conflicts with suppression, such as a nonzero Codex `project_doc_max_bytes`, Claude setting sources that include `project` or `local`, or Copilot custom-agent, alternate config/working-directory, resumed-session, or value-bearing suppression forms.
 When this option is `false`, missing, or `null`, all agents retain their existing project-setting behavior.
 
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.

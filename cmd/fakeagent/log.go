@@ -14,11 +14,12 @@ import (
 var logMu sync.Mutex
 
 type invocation struct {
-	Time   string   `json:"time"`
-	Agent  string   `json:"agent"`
-	Args   []string `json:"args"`
-	Prompt string   `json:"prompt"`
-	CWD    string   `json:"cwd,omitempty"`
+	Time                 string   `json:"time"`
+	Agent                string   `json:"agent"`
+	Args                 []string `json:"args"`
+	Prompt               string   `json:"prompt"`
+	CWD                  string   `json:"cwd,omitempty"`
+	CopilotHooksDisabled *bool    `json:"copilot_hooks_disabled,omitempty"`
 }
 
 func logInvocation(agent, prompt string, args []string) {
@@ -33,6 +34,10 @@ func logInvocation(agent, prompt string, args []string) {
 		Args:   args,
 		Prompt: prompt,
 		CWD:    cwd,
+	}
+	if agent == "copilot" {
+		disabled := copilotHooksDisabled()
+		rec.CopilotHooksDisabled = &disabled
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {

@@ -149,11 +149,12 @@ func TestNeutralizesGateInstructions_HonestOnEffectiveOverride(t *testing.T) {
 		t.Error("pi with an explicit -nc must stay neutralized")
 	}
 	// copilot: the exact suppression flag is compatible, but value-bearing
-	// variants and explicit project-agent selection make the guarantee ambiguous.
+	// variants, project-agent selection, and an alternate configuration root
+	// make the guarantee ambiguous.
 	if !NeutralizesGateInstructions(optOutAgent(t, types.AgentCopilot, []string{"--no-custom-instructions"})) {
 		t.Error("copilot with an explicit --no-custom-instructions must stay neutralized")
 	}
-	for _, override := range [][]string{{"--no-custom-instructions=false"}, {"--agent", "project-reviewer"}} {
+	for _, override := range [][]string{{"--no-custom-instructions=false"}, {"--agent", "project-reviewer"}, {"--config-dir", "/tmp/operator-copilot"}} {
 		if NeutralizesGateInstructions(optOutAgent(t, types.AgentCopilot, override)) {
 			t.Errorf("copilot override %v must fail closed", override)
 		}

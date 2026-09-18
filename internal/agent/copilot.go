@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -21,7 +24,7 @@ type copilotAgent struct {
 	bin       string
 	extraArgs []string
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
-	// buildArgs suppresses Copilot's project custom-instruction surface.
+	// Copilot runs with custom instructions and non-policy hooks disabled.
 	disableProjectSettings bool
 	subprocessContext
 }
@@ -31,13 +34,13 @@ func (a *copilotAgent) Name() string { return "copilot" }
 func (a *copilotAgent) ReportsAgentAttempts() bool { return true }
 
 // NeutralizesGateInstructions reports whether Copilot is launched without the
-// target checkout's custom instructions. Copilot CLI 1.0.86-2 documents
-// --no-custom-instructions as disabling AGENTS.md and related files. Explicit
-// custom-agent selection and value-bearing variants of the suppression flag
-// conflict with that guarantee, so the gate fails closed under those global
+// target checkout's custom instructions or hooks. Copilot CLI 1.0.86-2 documents
+// --no-custom-instructions for AGENTS.md and related files and disableAllHooks
+// for repository and user hooks. Explicit custom-agent or config-root selection
+// conflicts with those guarantees, so the gate fails closed under those global
 // overrides instead of launching an ambiguously configured reviewer.
 func (a *copilotAgent) NeutralizesGateInstructions() bool {
-	return a.disableProjectSettings && copilotCustomInstructionArgsNeutral(a.extraArgs)
+	return a.disableProjectSettings && copilotProjectSettingsArgsNeutral(a.extraArgs)
 }
 
 func (a *copilotAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
@@ -49,12 +52,32 @@ func (a *copilotAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 func (a *copilotAgent) Close() error { return nil }
 
 func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	prompt := buildCopilotPrompt(opts.Prompt, opts.JSONSchema)
+	promptText := opts.Prompt
+	cmdDir := opts.CWD
+	cmdEnv := a.gitSafeEnv(opts.CWD, opts.Env)
+	cleanup := func() {}
+	if a.disableProjectSettings {
+		targetDir, err := filepath.Abs(opts.CWD)
+		if err != nil {
+			return nil, fmt.Errorf("resolve copilot target directory: %w", err)
+		}
+		isolatedHome, isolatedCWD, cleanupIsolation, err := isolateCopilotProjectSettings(cmdEnv)
+		if err != nil {
+			return nil, fmt.Errorf("isolate copilot project settings: %w", err)
+		}
+		cleanup = cleanupIsolation
+		cmdDir = isolatedCWD
+		cmdEnv = append(a.gitSafeEnv(cmdDir, opts.Env), "COPILOT_HOME="+isolatedHome)
+		promptText = copilotIsolatedTargetPrompt(targetDir, promptText)
+	}
+	defer cleanup()
+
+	prompt := buildCopilotPrompt(promptText, opts.JSONSchema)
 	args := a.buildArgs()
 	cmd := exec.CommandContext(ctx, a.bin, args...)
-	cmd.Dir = opts.CWD
+	cmd.Dir = cmdDir
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
+	cmd.Env = cmdEnv
 	shellenv.ConfigureShellCommand(cmd)
 
 	var stderrBuf []byte
@@ -154,17 +177,18 @@ func copilotErrorDetail(copilotErr, stderr string) string {
 // buildArgs constructs the copilot CLI arguments. User-supplied extraArgs
 // (from agent_args_override) are normally inserted ahead of the managed flags
 // so user choices (e.g. --model, --effort) win over no-mistakes' defaults. The
-// trusted project-settings suppression flag is the exception: it is placed
-// first and a compatible operator copy is de-duplicated. If the user supplied
-// their own permission flag, the default --allow-all-tools is not added;
-// --no-ask-user is always added so the agent never blocks waiting for input.
+// trusted project-settings suppression flags are the exception: they are placed
+// first and compatible operator copies are de-duplicated. --allow-all-paths
+// retains target-worktree access while Copilot's process cwd is sterile. If the
+// user supplied their own permission flag, the default --allow-all-tools is not
+// added; --no-ask-user is always added so the agent never blocks for input.
 func (a *copilotAgent) buildArgs() []string {
-	args := make([]string, 0, len(a.extraArgs)+7)
+	args := make([]string, 0, len(a.extraArgs)+8)
 	if a.disableProjectSettings {
-		args = append(args, "--no-custom-instructions")
+		args = append(args, "--no-custom-instructions", "--allow-all-paths")
 	}
 	for _, arg := range a.extraArgs {
-		if a.disableProjectSettings && arg == "--no-custom-instructions" {
+		if a.disableProjectSettings && (arg == "--no-custom-instructions" || arg == "--allow-all-paths") {
 			continue
 		}
 		args = append(args, arg)
@@ -182,22 +206,107 @@ func (a *copilotAgent) buildArgs() []string {
 	return args
 }
 
-func copilotCustomInstructionArgsNeutral(extraArgs []string) bool {
+func copilotProjectSettingsArgsNeutral(extraArgs []string) bool {
 	for _, arg := range extraArgs {
+		if strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-r") {
+			return false
+		}
 		base := arg
 		if idx := strings.IndexByte(arg, '='); idx >= 0 {
 			base = arg[:idx]
 		}
 		switch base {
-		case "--agent":
+		case "--agent", "--config-dir", "--resume", "--continue", "--session-id", "--connect", "--worktree", "--add-dir", "--plugin-dir":
 			return false
-		case "--no-custom-instructions":
+		case "--no-custom-instructions", "--allow-all-paths":
 			if arg != base {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+const copilotIsolatedSettings = "{\n  \"disableAllHooks\": true\n}\n"
+
+// isolateCopilotProjectSettings creates private configuration and working roots
+// for one invocation. Running outside the target repository prevents Copilot
+// from discovering its settings and hooks; disableAllHooks is the supported
+// defense in depth for every non-policy hook visible from the sterile session.
+// Authentication metadata and BYOK provider definitions are copied so the
+// currently authenticated/configured Copilot remains usable. The target tree is
+// never changed.
+func isolateCopilotProjectSettings(env []string) (string, string, func(), error) {
+	root, err := os.MkdirTemp("", "no-mistakes-copilot-*")
+	if err != nil {
+		return "", "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(root) }
+	fail := func(err error) (string, string, func(), error) {
+		cleanup()
+		return "", "", nil, err
+	}
+	home := filepath.Join(root, "config")
+	workDir := filepath.Join(root, "session")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		return fail(fmt.Errorf("create Copilot config root: %w", err))
+	}
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		return fail(fmt.Errorf("create Copilot session root: %w", err))
+	}
+
+	if source := copilotHomeFromEnv(env); source != "" {
+		for _, name := range []string{"config.json", "providers.json"} {
+			data, readErr := os.ReadFile(filepath.Join(source, name))
+			if readErr != nil {
+				if os.IsNotExist(readErr) {
+					continue
+				}
+				return fail(fmt.Errorf("read Copilot %s: %w", name, readErr))
+			}
+			if writeErr := os.WriteFile(filepath.Join(home, name), data, 0o600); writeErr != nil {
+				return fail(fmt.Errorf("copy Copilot %s: %w", name, writeErr))
+			}
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(copilotIsolatedSettings), 0o600); err != nil {
+		return fail(fmt.Errorf("write Copilot hook isolation settings: %w", err))
+	}
+
+	return home, workDir, cleanup, nil
+}
+
+func copilotIsolatedTargetPrompt(targetDir, prompt string) string {
+	return "## no-mistakes isolated target\n\n" +
+		"Your process working directory is intentionally empty so the target repository cannot load Copilot project settings or hooks. " +
+		"The repository you must inspect and modify is at " + strconv.Quote(targetDir) + ". " +
+		"Perform every file and shell operation against that exact directory, using absolute paths or changing to it within each shell command. " +
+		"Do not treat the process working directory as the repository.\n\n" + prompt
+}
+
+func copilotHomeFromEnv(env []string) string {
+	if home := lastEnvValue(env, "COPILOT_HOME"); home != "" {
+		return home
+	}
+	for _, key := range []string{"HOME", "USERPROFILE"} {
+		if home := lastEnvValue(env, key); home != "" {
+			return filepath.Join(home, ".copilot")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".copilot")
+	}
+	return ""
+}
+
+func lastEnvValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix)
+		}
+	}
+	return ""
 }
 
 // copilotUserSetPermissionMode reports whether extraArgs already grant tool

@@ -20,12 +20,25 @@ import (
 type copilotAgent struct {
 	bin       string
 	extraArgs []string
+	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
+	// buildArgs suppresses Copilot's project custom-instruction surface.
+	disableProjectSettings bool
 	subprocessContext
 }
 
 func (a *copilotAgent) Name() string { return "copilot" }
 
 func (a *copilotAgent) ReportsAgentAttempts() bool { return true }
+
+// NeutralizesGateInstructions reports whether Copilot is launched without the
+// target checkout's custom instructions. Copilot CLI 1.0.86-2 documents
+// --no-custom-instructions as disabling AGENTS.md and related files. Explicit
+// custom-agent selection and value-bearing variants of the suppression flag
+// conflict with that guarantee, so the gate fails closed under those global
+// overrides instead of launching an ambiguously configured reviewer.
+func (a *copilotAgent) NeutralizesGateInstructions() bool {
+	return a.disableProjectSettings && copilotCustomInstructionArgsNeutral(a.extraArgs)
+}
 
 func (a *copilotAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, "copilot", opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
@@ -139,14 +152,23 @@ func copilotErrorDetail(copilotErr, stderr string) string {
 }
 
 // buildArgs constructs the copilot CLI arguments. User-supplied extraArgs
-// (from agent_args_override) are inserted ahead of the managed flags so user
-// choices (e.g. --model, --effort) win over no-mistakes' defaults. If the user
-// supplied their own permission flag, the default --allow-all-tools is not
-// added; --no-ask-user is always added so the agent never blocks waiting for
-// interactive input.
+// (from agent_args_override) are normally inserted ahead of the managed flags
+// so user choices (e.g. --model, --effort) win over no-mistakes' defaults. The
+// trusted project-settings suppression flag is the exception: it is placed
+// first and a compatible operator copy is de-duplicated. If the user supplied
+// their own permission flag, the default --allow-all-tools is not added;
+// --no-ask-user is always added so the agent never blocks waiting for input.
 func (a *copilotAgent) buildArgs() []string {
-	args := make([]string, 0, len(a.extraArgs)+6)
-	args = append(args, a.extraArgs...)
+	args := make([]string, 0, len(a.extraArgs)+7)
+	if a.disableProjectSettings {
+		args = append(args, "--no-custom-instructions")
+	}
+	for _, arg := range a.extraArgs {
+		if a.disableProjectSettings && arg == "--no-custom-instructions" {
+			continue
+		}
+		args = append(args, arg)
+	}
 	args = append(args,
 		"--output-format", "json",
 		"--no-color",
@@ -158,6 +180,24 @@ func (a *copilotAgent) buildArgs() []string {
 		args = append(args, "--allow-all-tools")
 	}
 	return args
+}
+
+func copilotCustomInstructionArgsNeutral(extraArgs []string) bool {
+	for _, arg := range extraArgs {
+		base := arg
+		if idx := strings.IndexByte(arg, '='); idx >= 0 {
+			base = arg[:idx]
+		}
+		switch base {
+		case "--agent":
+			return false
+		case "--no-custom-instructions":
+			if arg != base {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // copilotUserSetPermissionMode reports whether extraArgs already grant tool

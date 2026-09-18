@@ -46,6 +46,8 @@ func run(argv []string) int {
 		return runGrok(args, scenario)
 	case "pi":
 		return runPi(args, os.Stdin, scenario)
+	case "copilot":
+		return runCopilot(args, os.Stdin, scenario)
 	case "antigravity", "agy":
 		return runAgy(args, scenario)
 	case "opencode":

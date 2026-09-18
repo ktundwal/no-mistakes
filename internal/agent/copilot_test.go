@@ -51,6 +51,85 @@ func TestCopilotAgent_BuildArgs_ExtraArgsFirst(t *testing.T) {
 	}
 }
 
+func TestCopilotAgent_BuildArgs_OptOutSuppressesProjectInstructions(t *testing.T) {
+	ca := &copilotAgent{
+		bin:                    "copilot",
+		extraArgs:              []string{"--model", "gpt-5.4"},
+		disableProjectSettings: true,
+	}
+	args := ca.buildArgs()
+	expected := []string{
+		"--no-custom-instructions",
+		"--model", "gpt-5.4",
+		"--output-format", "json",
+		"--no-color",
+		"--no-ask-user",
+		"--allow-all-tools",
+	}
+	if len(args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
+	}
+	for i, want := range expected {
+		if args[i] != want {
+			t.Errorf("arg[%d]: expected %q, got %q", i, want, args[i])
+		}
+	}
+}
+
+func TestCopilotAgent_BuildArgs_OptOutDeduplicatesCompatibleOverride(t *testing.T) {
+	ca := &copilotAgent{
+		bin:                    "copilot",
+		extraArgs:              []string{"--model", "gpt-5.4", "--no-custom-instructions"},
+		disableProjectSettings: true,
+	}
+	args := ca.buildArgs()
+	if args[0] != "--no-custom-instructions" {
+		t.Fatalf("security flag must be first, got %v", args)
+	}
+	count := 0
+	for _, arg := range args {
+		if arg == "--no-custom-instructions" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("buildArgs = %v, want one --no-custom-instructions", args)
+	}
+}
+
+func TestCopilotAgent_NeutralizesGateInstructions(t *testing.T) {
+	if NeutralizesGateInstructions(&copilotAgent{bin: "copilot"}) {
+		t.Fatal("Copilot must not report neutralized without the trusted opt-out")
+	}
+	if !NeutralizesGateInstructions(&copilotAgent{bin: "copilot", disableProjectSettings: true}) {
+		t.Fatal("Copilot must report neutralized under the trusted opt-out")
+	}
+	if !NeutralizesGateInstructions(&copilotAgent{
+		bin:                    "copilot",
+		extraArgs:              []string{"--no-custom-instructions"},
+		disableProjectSettings: true,
+	}) {
+		t.Fatal("a compatible operator suppression flag must remain neutralized")
+	}
+}
+
+func TestCopilotAgent_NeutralizationRefusesConflictingOverrides(t *testing.T) {
+	for _, extraArgs := range [][]string{
+		{"--no-custom-instructions=false"},
+		{"--no-custom-instructions=true"},
+		{"--agent", "project-reviewer"},
+		{"--agent=project-reviewer"},
+	} {
+		a := &copilotAgent{bin: "copilot", extraArgs: extraArgs, disableProjectSettings: true}
+		if NeutralizesGateInstructions(a) {
+			t.Errorf("override %v must fail closed", extraArgs)
+		}
+		if err := EnsureGateNeutralized(a); err == nil {
+			t.Errorf("override %v must be refused before launch", extraArgs)
+		}
+	}
+}
+
 func TestCopilotAgent_BuildArgs_UserPermissionSuppressesDefault(t *testing.T) {
 	tests := []struct {
 		name     string

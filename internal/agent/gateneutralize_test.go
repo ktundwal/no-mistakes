@@ -19,17 +19,17 @@ func optOutAgent(t *testing.T, name types.AgentName, extraArgs []string) Agent {
 }
 
 // TestNeutralizesGateInstructions_OnlyVerifiedHarnessesUnderOptOut is the core
-// fail-closed contract: under the opt-out, only codex, claude, and pi (whose
-// suppression knobs are empirically verified) neutralize the target repo's
-// project agent settings/instructions; every other harness reports false and is
-// refused rather than launched with project instructions loaded.
+// fail-closed contract: under the opt-out, only harnesses whose suppression
+// knobs are empirically verified neutralize the target repo's project agent
+// settings/instructions; every other harness is refused rather than launched
+// with project instructions loaded.
 func TestNeutralizesGateInstructions_OnlyVerifiedHarnessesUnderOptOut(t *testing.T) {
-	for _, name := range []types.AgentName{types.AgentCodex, types.AgentClaude, types.AgentPi} {
+	for _, name := range []types.AgentName{types.AgentCodex, types.AgentClaude, types.AgentPi, types.AgentCopilot} {
 		if !NeutralizesGateInstructions(optOutAgent(t, name, nil)) {
 			t.Errorf("%s must neutralize under the opt-out with its default knob", name)
 		}
 	}
-	unverified := []types.AgentName{types.AgentGrok, types.AgentOpenCode, types.AgentCopilot, types.AgentRovoDev}
+	unverified := []types.AgentName{types.AgentGrok, types.AgentOpenCode, types.AgentRovoDev}
 	for _, name := range unverified {
 		if NeutralizesGateInstructions(optOutAgent(t, name, nil)) {
 			t.Errorf("%s has no verified knob; must NOT report neutralized", name)
@@ -50,11 +50,11 @@ func TestNeutralizesGateInstructions_OnlyVerifiedHarnessesUnderOptOut(t *testing
 	}
 }
 
-// TestNeutralizesGateInstructions_FalseWithoutOptOut proves codex, claude, and pi
-// do NOT claim neutralization when the repo did not opt out - the gate only consults
-// this under the opt-out, but the value must be honest.
+// TestNeutralizesGateInstructions_FalseWithoutOptOut proves verified adapters
+// do NOT claim neutralization when the repo did not opt out - the gate only
+// consults this under the opt-out, but the value must be honest.
 func TestNeutralizesGateInstructions_FalseWithoutOptOut(t *testing.T) {
-	for _, name := range []types.AgentName{types.AgentCodex, types.AgentClaude, types.AgentPi, types.AgentGrok} {
+	for _, name := range []types.AgentName{types.AgentCodex, types.AgentClaude, types.AgentPi, types.AgentCopilot, types.AgentGrok} {
 		a, err := NewWithOptions(name, string(name), nil, Options{}) // no opt-out
 		if err != nil {
 			t.Fatalf("NewWithOptions(%s): %v", name, err)
@@ -66,16 +66,12 @@ func TestNeutralizesGateInstructions_FalseWithoutOptOut(t *testing.T) {
 }
 
 // TestEnsureGateNeutralized_RefusesUnsupportedUnderOptOut proves the gate fails
-// closed for an unsupported harness and admits codex, claude, and pi.
+// closed for an unsupported harness and admits every verified one.
 func TestEnsureGateNeutralized_RefusesUnsupportedUnderOptOut(t *testing.T) {
-	if err := EnsureGateNeutralized(optOutAgent(t, types.AgentCodex, nil)); err != nil {
-		t.Errorf("codex must pass the gate under opt-out: %v", err)
-	}
-	if err := EnsureGateNeutralized(optOutAgent(t, types.AgentClaude, nil)); err != nil {
-		t.Errorf("claude must pass the gate under opt-out: %v", err)
-	}
-	if err := EnsureGateNeutralized(optOutAgent(t, types.AgentPi, nil)); err != nil {
-		t.Errorf("pi must pass the gate under opt-out: %v", err)
+	for _, name := range []types.AgentName{types.AgentCodex, types.AgentClaude, types.AgentPi, types.AgentCopilot} {
+		if err := EnsureGateNeutralized(optOutAgent(t, name, nil)); err != nil {
+			t.Errorf("%s must pass the gate under opt-out: %v", name, err)
+		}
 	}
 	if err := EnsureGateNeutralized(optOutAgent(t, types.AgentGrok, nil)); err == nil {
 		t.Error("grok must remain refused until project-setting isolation is empirically verified")
@@ -151,5 +147,15 @@ func TestNeutralizesGateInstructions_HonestOnEffectiveOverride(t *testing.T) {
 	}
 	if !NeutralizesGateInstructions(optOutAgent(t, types.AgentPi, []string{"-nc"})) {
 		t.Error("pi with an explicit -nc must stay neutralized")
+	}
+	// copilot: the exact suppression flag is compatible, but value-bearing
+	// variants and explicit project-agent selection make the guarantee ambiguous.
+	if !NeutralizesGateInstructions(optOutAgent(t, types.AgentCopilot, []string{"--no-custom-instructions"})) {
+		t.Error("copilot with an explicit --no-custom-instructions must stay neutralized")
+	}
+	for _, override := range [][]string{{"--no-custom-instructions=false"}, {"--agent", "project-reviewer"}} {
+		if NeutralizesGateInstructions(optOutAgent(t, types.AgentCopilot, override)) {
+			t.Errorf("copilot override %v must fail closed", override)
+		}
 	}
 }

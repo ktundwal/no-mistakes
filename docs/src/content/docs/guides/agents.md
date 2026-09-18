@@ -298,9 +298,10 @@ When structured output is requested, no-mistakes injects the JSON schema into th
 
 ## Copilot CLI
 
-Spawns a `copilot` subprocess for each invocation with `-p <prompt> --output-format json`.
+Spawns a `copilot` subprocess for each invocation with the prompt on stdin and `--output-format json`.
 It also adds `--no-color` and `--no-ask-user` so the run is non-interactive, plus `--allow-all-tools` (required for non-interactive mode) unless you already set your own Copilot permission flag through `agent_args_override`.
-Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed flags, so user choices take effect. Prefer [`agent_config.copilot`](/no-mistakes/reference/global-config/#agent_config) for model and reasoning effort; it renders the same `--model` and `--effort` flags, and a raw flag here still wins over it.
+When the trusted repository config sets [`disable_project_settings: true`](/no-mistakes/reference/repo-config/#disable_project_settings), Copilot receives `--no-custom-instructions` before operator arguments so target-repository `AGENTS.md` and related custom instructions are not loaded. The gate fails closed if a Copilot override selects a custom agent or uses a conflicting value-bearing form of the suppression flag. This behavior is verified with Copilot CLI 1.0.86-2.
+Any other `agent_args_override.copilot` flags are inserted before no-mistakes' ordinary managed flags, so user choices take effect. Prefer [`agent_config.copilot`](/no-mistakes/reference/global-config/#agent_config) for model and reasoning effort; it renders the same `--model` and `--effort` flags, and a raw flag here still wins over it.
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the common text fallback described above.
 

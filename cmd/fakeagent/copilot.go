@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -23,8 +25,9 @@ func runCopilot(args []string, input io.Reader, scenario *Scenario) int {
 	}
 	prompt := string(data)
 	logInvocation("copilot", prompt, args)
-	action := scenario.Match(prompt)
-	if err := applyAction(action); err != nil {
+	workDir := copilotPromptWorkDir(prompt)
+	action := scenario.MatchInDir(workDir, prompt)
+	if err := applyActionInDir(workDir, action); err != nil {
 		return 1
 	}
 
@@ -51,4 +54,44 @@ func hasExactArg(args []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func copilotHooksDisabled() bool {
+	home := os.Getenv("COPILOT_HOME")
+	if home == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(home, "settings.json"))
+	if err != nil {
+		return false
+	}
+	var settings struct {
+		DisableAllHooks bool `json:"disableAllHooks"`
+	}
+	return json.Unmarshal(data, &settings) == nil && settings.DisableAllHooks
+}
+
+func copilotPromptWorkDir(prompt string) string {
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = "."
+	}
+	const (
+		prefix = "The repository you must inspect and modify is at "
+		suffix = ". Perform every file and shell operation"
+	)
+	start := strings.Index(prompt, prefix)
+	if start < 0 {
+		return wd
+	}
+	quoted := prompt[start+len(prefix):]
+	end := strings.Index(quoted, suffix)
+	if end < 0 {
+		return wd
+	}
+	target, err := strconv.Unquote(quoted[:end])
+	if err != nil || !filepath.IsAbs(target) {
+		return wd
+	}
+	return target
 }

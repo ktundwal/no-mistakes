@@ -60,6 +60,7 @@ func TestCopilotAgent_BuildArgs_OptOutSuppressesProjectInstructions(t *testing.T
 	args := ca.buildArgs()
 	expected := []string{
 		"--no-custom-instructions",
+		"--allow-all-paths",
 		"--model", "gpt-5.4",
 		"--output-format", "json",
 		"--no-color",
@@ -79,21 +80,21 @@ func TestCopilotAgent_BuildArgs_OptOutSuppressesProjectInstructions(t *testing.T
 func TestCopilotAgent_BuildArgs_OptOutDeduplicatesCompatibleOverride(t *testing.T) {
 	ca := &copilotAgent{
 		bin:                    "copilot",
-		extraArgs:              []string{"--model", "gpt-5.4", "--no-custom-instructions"},
+		extraArgs:              []string{"--model", "gpt-5.4", "--no-custom-instructions", "--allow-all-paths"},
 		disableProjectSettings: true,
 	}
 	args := ca.buildArgs()
 	if args[0] != "--no-custom-instructions" {
 		t.Fatalf("security flag must be first, got %v", args)
 	}
-	count := 0
+	counts := map[string]int{}
 	for _, arg := range args {
-		if arg == "--no-custom-instructions" {
-			count++
-		}
+		counts[arg]++
 	}
-	if count != 1 {
-		t.Fatalf("buildArgs = %v, want one --no-custom-instructions", args)
+	for _, managed := range []string{"--no-custom-instructions", "--allow-all-paths"} {
+		if counts[managed] != 1 {
+			t.Fatalf("buildArgs = %v, want one %s", args, managed)
+		}
 	}
 }
 
@@ -117,8 +118,17 @@ func TestCopilotAgent_NeutralizationRefusesConflictingOverrides(t *testing.T) {
 	for _, extraArgs := range [][]string{
 		{"--no-custom-instructions=false"},
 		{"--no-custom-instructions=true"},
+		{"--allow-all-paths=false"},
 		{"--agent", "project-reviewer"},
 		{"--agent=project-reviewer"},
+		{"--config-dir", "/tmp/operator-copilot"},
+		{"--config-dir=/tmp/operator-copilot"},
+		{"-C", "/tmp/project"},
+		{"--resume", "session-id"},
+		{"--worktree", "branch"},
+		{"--add-dir", "/tmp/project"},
+		{"--plugin-dir=/tmp/project-plugin"},
+		{"-rsession-id"},
 	} {
 		a := &copilotAgent{bin: "copilot", extraArgs: extraArgs, disableProjectSettings: true}
 		if NeutralizesGateInstructions(a) {
@@ -127,6 +137,84 @@ func TestCopilotAgent_NeutralizationRefusesConflictingOverrides(t *testing.T) {
 		if err := EnsureGateNeutralized(a); err == nil {
 			t.Errorf("override %v must be refused before launch", extraArgs)
 		}
+	}
+}
+
+func TestIsolateCopilotProjectSettings_DisablesHooksAndPreservesAuthState(t *testing.T) {
+	source := t.TempDir()
+	config := []byte(`{"loggedInUsers":[{"login":"operator"}]}`)
+	providers := []byte(`{"providers":{"local":{"type":"openai"}}}`)
+	if err := os.WriteFile(filepath.Join(source, "config.json"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "providers.json"), providers, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	isolated, workDir, cleanup, err := isolateCopilotProjectSettings([]string{
+		"HOME=" + t.TempDir(),
+		"COPILOT_HOME=" + source,
+	})
+	if err != nil {
+		t.Fatalf("isolateCopilotProjectSettings: %v", err)
+	}
+	if isolated == "" || isolated == source {
+		cleanup()
+		t.Fatalf("COPILOT_HOME = %q, want a private invocation root", isolated)
+	}
+	if workDir == "" || filepath.Dir(workDir) != filepath.Dir(isolated) || workDir == isolated {
+		cleanup()
+		t.Fatalf("isolated work dir = %q, config root = %q", workDir, isolated)
+	}
+
+	settingsData, err := os.ReadFile(filepath.Join(isolated, "settings.json"))
+	if err != nil {
+		cleanup()
+		t.Fatalf("read isolated settings: %v", err)
+	}
+	var settings struct {
+		DisableAllHooks bool `json:"disableAllHooks"`
+	}
+	if err := json.Unmarshal(settingsData, &settings); err != nil {
+		cleanup()
+		t.Fatalf("parse isolated settings: %v", err)
+	}
+	if !settings.DisableAllHooks {
+		cleanup()
+		t.Fatalf("isolated settings = %s, want disableAllHooks=true", settingsData)
+	}
+	for name, want := range map[string][]byte{"config.json": config, "providers.json": providers} {
+		got, err := os.ReadFile(filepath.Join(isolated, name))
+		if err != nil {
+			cleanup()
+			t.Fatalf("read copied %s: %v", name, err)
+		}
+		if string(got) != string(want) {
+			cleanup()
+			t.Errorf("copied %s = %q, want %q", name, got, want)
+		}
+	}
+
+	root := filepath.Dir(isolated)
+	cleanup()
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("isolated Copilot root survived cleanup: %v", err)
+	}
+
+	if got := copilotIsolatedTargetPrompt("/target/repo", "review changes"); !strings.Contains(got, `"/target/repo"`) || !strings.HasSuffix(got, "review changes") {
+		t.Fatalf("isolated target prompt did not bind target path and original prompt: %q", got)
+	}
+}
+
+func TestCopilotHomeFromEnv_UsesEffectiveInvocationEnvironment(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "operator-copilot")
+	got := copilotHomeFromEnv([]string{
+		"COPILOT_HOME=/stale",
+		"HOME=/irrelevant",
+		"COPILOT_HOME=" + want,
+	})
+	if got != want {
+		t.Fatalf("copilotHomeFromEnv = %q, want final override %q", got, want)
 	}
 }
 
